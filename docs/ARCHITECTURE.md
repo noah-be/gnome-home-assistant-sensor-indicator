@@ -9,6 +9,9 @@ The extension consists of four small modules:
   through libsecret.
 - `format.js` selects attributes and converts Home Assistant responses into panel
   labels. It has no GNOME dependencies and is covered by unit tests.
+- `bin/home-assistant-sensor-tray` provides a temporary AppIndicator with its own
+  GTK preferences dialog for use before GNOME loads a newly installed extension.
+  It shares the native extension's settings schema and keyring item.
 
 ## Refresh flow
 

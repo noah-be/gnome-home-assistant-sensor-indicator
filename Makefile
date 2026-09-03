@@ -1,7 +1,7 @@
 UUID := home-assistant-sensor-indicator@noah-be.github.io
 INSTALL_DIR := $(HOME)/.local/share/gnome-shell/extensions/$(UUID)
 DIST_DIR := dist
-SOURCES := extension.js format.js metadata.json prefs.js secret.js stylesheet.css schemas
+SOURCES := bin extension.js format.js metadata.json prefs.js secret.js stylesheet.css schemas
 
 .PHONY: all clean enable install pack test uninstall validate
 
@@ -12,6 +12,7 @@ test:
 
 validate: test
 	jq empty metadata.json package.json
+	python3 -c 'from pathlib import Path; path = Path("bin/home-assistant-sensor-tray"); compile(path.read_text(), str(path), "exec")'
 	node --check extension.js
 	node --check format.js
 	node --check prefs.js
@@ -33,7 +34,7 @@ uninstall:
 pack: validate
 	mkdir -p "$(DIST_DIR)"
 	gnome-extensions pack --force --out-dir="$(DIST_DIR)" \
-		--extra-source=format.js --extra-source=secret.js .
+		--extra-source=bin --extra-source=format.js --extra-source=secret.js .
 
 clean:
 	rm -rf "$(DIST_DIR)" schemas/gschemas.compiled

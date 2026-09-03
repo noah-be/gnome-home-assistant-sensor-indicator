@@ -28,6 +28,8 @@ attribute in the top panel.
 - A Home Assistant long-lived access token.
 - The GNOME Secret Service and libsecret introspection package. These are
   installed by default on standard GNOME desktops.
+- The optional immediate-start indicator additionally requires Python 3, GTK 3,
+  AppIndicator 3, and their GObject-introspection bindings.
 
 ## Install from source
 
@@ -49,6 +51,21 @@ Open its settings through the Extensions application or from a terminal:
 ```console
 gnome-extensions prefs home-assistant-sensor-indicator@noah-be.github.io
 ```
+
+### Start immediately without logging out
+
+GNOME Wayland cannot load a newly installed native Shell extension into the
+running session. If AppIndicator support is active, start the included temporary
+indicator instead:
+
+```console
+./bin/home-assistant-sensor-tray
+```
+
+The temporary indicator uses the same GSettings values and GNOME-keyring token
+as the native extension. Its menu contains **Preferences**, **Refresh now**, and
+**Quit temporary indicator**, so it can be configured and used immediately. Quit
+it after the native extension becomes available following a later login.
 
 ## Configure Home Assistant
 

@@ -1,0 +1,516 @@
+#!/usr/bin/env python3
+"""Run an AppIndicator fallback without restarting GNOME Shell."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime
+import json
+from pathlib import Path
+import signal
+import sys
+import threading
+from typing import Any
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
+
+import gi
+
+gi.require_version("AppIndicator3", "0.1")
+gi.require_version("GLibUnix", "2.0")
+gi.require_version("Gtk", "3.0")
+gi.require_version("Secret", "1")
+
+from gi.repository import AppIndicator3, Gio, GLib, GLibUnix, Gtk, Secret
+
+
+SETTINGS_SCHEMA_ID = "io.github.noahbe.home-assistant-sensor-indicator"
+EXTENSION_UUID = "home-assistant-sensor-indicator@noah-be.github.io"
+SECRET_SCHEMA = Secret.Schema.new(
+    "io.github.noahbe.HomeAssistantSensorIndicator",
+    Secret.SchemaFlags.NONE,
+    {"extension": Secret.SchemaAttributeType.STRING},
+)
+SECRET_ATTRIBUTES = {"extension": EXTENSION_UUID}
+INTERVAL_SECONDS = (5, 10, 30, 60, 300, 600, 1800, 3600)
+REQUEST_TIMEOUT_SECONDS = 15
+
+
+class IndicatorError(RuntimeError):
+    """A user-facing Home Assistant or configuration error."""
+
+
+def load_settings() -> Gio.Settings:
+    """Open the extension settings from its installed schema."""
+
+    schema_dir = (
+        Path.home()
+        / ".local"
+        / "share"
+        / "gnome-shell"
+        / "extensions"
+        / EXTENSION_UUID
+        / "schemas"
+    )
+    if not (schema_dir / "gschemas.compiled").is_file():
+        raise IndicatorError(
+            "The extension settings are not installed. Run `make install` first."
+        )
+
+    source = Gio.SettingsSchemaSource.new_from_directory(
+        str(schema_dir), Gio.SettingsSchemaSource.get_default(), False
+    )
+    schema = source.lookup(SETTINGS_SCHEMA_ID, False)
+    if schema is None:
+        raise IndicatorError("The installed extension settings schema is unavailable.")
+    return Gio.Settings.new_full(schema, None, None)
+
+
+def value_at_path(attributes: dict[str, Any], path: str) -> Any:
+    value: Any = attributes
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise IndicatorError(f'Attribute “{path}” was not found.')
+        value = value[part]
+    return value
+
+
+def format_value(value: Any, decimal_places: int) -> str:
+    if value is None:
+        return "null"
+    if decimal_places >= 0 and value != "":
+        try:
+            return f"{float(value):.{decimal_places}f}"
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
+def build_display(entity: dict[str, Any], settings: Gio.Settings) -> dict[str, str]:
+    entity_id = entity.get("entity_id")
+    state = entity.get("state")
+    if not isinstance(entity_id, str) or not isinstance(state, str):
+        raise IndicatorError("Home Assistant returned an unexpected response.")
+
+    attributes = entity.get("attributes")
+    if not isinstance(attributes, dict):
+        attributes = {}
+    attribute = settings.get_string("attribute").strip()
+    raw_value = value_at_path(attributes, attribute) if attribute else state
+    value = format_value(raw_value, settings.get_int("decimal-places"))
+    name = (
+        settings.get_string("display-name").strip()
+        or str(attributes.get("friendly_name") or entity_id)
+    )
+    unit = str(attributes.get("unit_of_measurement") or "")
+    label = settings.get_string("label-template") or "{name}: {value} {unit}"
+    for placeholder, replacement in {
+        "{entity}": entity_id,
+        "{name}": name,
+        "{unit}": unit,
+        "{value}": value,
+    }.items():
+        label = label.replace(placeholder, replacement)
+
+    return {
+        "attribute": attribute,
+        "entity": entity_id,
+        "label": " ".join(label.split()).strip() or value or entity_id,
+        "name": name,
+        "unit": unit,
+        "value": value,
+    }
+
+
+def fetch_entity(base_url: str, entity_id: str, token: str) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/states/{urlparse.quote(entity_id, safe='')}"
+    request = urlrequest.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "GNOME Home Assistant Sensor Indicator/1",
+        },
+        method="GET",
+    )
+    try:
+        with urlrequest.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            payload = json.load(response)
+    except urlerror.HTTPError as error:
+        if error.code == 401:
+            raise IndicatorError("Home Assistant rejected the access token.") from error
+        if error.code == 404:
+            raise IndicatorError(f'Entity “{entity_id}” was not found.') from error
+        raise IndicatorError(f"Home Assistant returned HTTP {error.code}.") from error
+    except (urlerror.URLError, TimeoutError, ValueError) as error:
+        reason = getattr(error, "reason", error)
+        raise IndicatorError(f"Could not reach Home Assistant: {reason}") from error
+
+    if not isinstance(payload, dict):
+        raise IndicatorError("Home Assistant returned an unexpected response.")
+    return payload
+
+
+def format_timestamp(timestamp: Any) -> str:
+    if not isinstance(timestamp, str) or not timestamp:
+        return "unknown"
+    try:
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone().strftime(
+            "%c %Z"
+        )
+    except ValueError:
+        return timestamp
+
+
+def interval_label(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds} seconds"
+    minutes = seconds // 60
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
+class TrayIndicator:
+    """Own the temporary AppIndicator, settings dialog, and refresh worker."""
+
+    def __init__(self, settings: Gio.Settings) -> None:
+        self._settings = settings
+        self._interval = settings.get_uint("refresh-interval")
+        self._refreshing = False
+        self._refresh_pending = False
+        self._timer_id = 0
+        self._settings_changed_id = settings.connect("changed", self._on_setting_changed)
+
+        self._indicator = AppIndicator3.Indicator.new(
+            "gnome-home-assistant-sensor-indicator",
+            "user-home-symbolic",
+            AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+        )
+        self._indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self._indicator.set_title("Home Assistant Sensor Indicator")
+        self._indicator.set_label("Home Assistant …", "Home Assistant sensor value")
+
+        menu = Gtk.Menu()
+        self._name_item = self._information_item("Entity: —")
+        self._value_item = self._information_item("Value: —")
+        self._changed_item = self._information_item("Changed: —")
+        self._updated_item = self._information_item("Updated: —")
+        for item in (
+            self._name_item,
+            self._value_item,
+            self._changed_item,
+            self._updated_item,
+        ):
+            menu.append(item)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        refresh_item = Gtk.MenuItem(label="Refresh now")
+        refresh_item.connect("activate", lambda _item: self.refresh())
+        menu.append(refresh_item)
+
+        open_item = Gtk.MenuItem(label="Open Home Assistant")
+        open_item.connect("activate", lambda _item: self._open_home_assistant())
+        menu.append(open_item)
+
+        preferences_item = Gtk.MenuItem(label="Preferences")
+        preferences_item.connect("activate", lambda _item: self._open_preferences())
+        menu.append(preferences_item)
+
+        self._interval_item = Gtk.MenuItem(
+            label=f"Refresh interval: {interval_label(self._interval)}"
+        )
+        interval_menu = Gtk.Menu()
+        first_radio = None
+        radio_items = []
+        for seconds in sorted(set((*INTERVAL_SECONDS, self._interval))):
+            radio = Gtk.RadioMenuItem.new_with_label_from_widget(
+                first_radio, interval_label(seconds)
+            )
+            if first_radio is None:
+                first_radio = radio
+            radio_items.append((radio, seconds))
+            interval_menu.append(radio)
+        for radio, seconds in radio_items:
+            radio.set_active(seconds == self._interval)
+        for radio, seconds in radio_items:
+            radio.connect("toggled", self._on_interval_toggled, seconds)
+        self._interval_item.set_submenu(interval_menu)
+        menu.append(self._interval_item)
+
+        quit_item = Gtk.MenuItem(label="Quit temporary indicator")
+        quit_item.connect("activate", lambda _item: self._quit())
+        menu.append(quit_item)
+
+        menu.show_all()
+        self._indicator.set_menu(menu)
+
+    @staticmethod
+    def _information_item(label: str) -> Gtk.MenuItem:
+        item = Gtk.MenuItem(label=label)
+        item.set_sensitive(False)
+        return item
+
+    def start(self) -> None:
+        self.refresh()
+        self._schedule_timeout()
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self._quit)
+        Gtk.main()
+
+    def refresh(self) -> None:
+        if self._refreshing:
+            self._refresh_pending = True
+            return
+        self._refreshing = True
+        base_url = self._settings.get_string("base-url").strip()
+        entity_id = self._settings.get_string("entity-id").strip()
+        threading.Thread(
+            target=self._fetch_in_background,
+            args=(base_url, entity_id),
+            daemon=True,
+        ).start()
+
+    def _fetch_in_background(self, base_url: str, entity_id: str) -> None:
+        try:
+            if not base_url or not entity_id:
+                raise IndicatorError(
+                    "Open Preferences and configure the Home Assistant URL and entity ID."
+                )
+            token = Secret.password_lookup_sync(SECRET_SCHEMA, SECRET_ATTRIBUTES, None)
+            if not token:
+                raise IndicatorError(
+                    "No access token is stored. Open Preferences to add one."
+                )
+            entity = fetch_entity(base_url, entity_id, token)
+        except (IndicatorError, GLib.Error, OSError) as error:
+            GLib.idle_add(self._show_error, str(error))
+        else:
+            GLib.idle_add(self._show_entity, entity)
+
+    def _show_entity(self, entity: dict[str, Any]) -> bool:
+        try:
+            display = build_display(entity, self._settings)
+        except IndicatorError as error:
+            return self._show_error(str(error))
+
+        self._indicator.set_label(display["label"], "Home Assistant sensor value")
+        self._name_item.set_label(f'Entity: {display["name"]} ({display["entity"]})')
+        if display["attribute"]:
+            value_label = f'Attribute {display["attribute"]}: {display["value"]}'
+        else:
+            unit = f' {display["unit"]}' if display["unit"] else ""
+            value_label = f'State: {display["value"]}{unit}'
+        self._value_item.set_label(value_label)
+        self._changed_item.set_label(
+            f'Changed: {format_timestamp(entity.get("last_changed"))}'
+        )
+        self._updated_item.set_label(
+            f'Updated: {format_timestamp(entity.get("last_updated"))}'
+        )
+        self._finish_refresh()
+        return GLib.SOURCE_REMOVE
+
+    def _show_error(self, message: str) -> bool:
+        self._indicator.set_label("Home Assistant !", "Home Assistant sensor value")
+        self._name_item.set_label("Sensor unavailable")
+        self._value_item.set_label(message or "Unknown error")
+        self._changed_item.set_label("Check the connection settings and entity ID.")
+        self._updated_item.set_label("Select “Refresh now” to retry.")
+        self._finish_refresh()
+        return GLib.SOURCE_REMOVE
+
+    def _finish_refresh(self) -> None:
+        self._refreshing = False
+        if self._refresh_pending:
+            self._refresh_pending = False
+            GLib.idle_add(self.refresh)
+
+    def _schedule_timeout(self) -> None:
+        if self._timer_id:
+            GLib.source_remove(self._timer_id)
+        self._timer_id = GLib.timeout_add_seconds(self._interval, self._on_timeout)
+
+    def _on_timeout(self) -> bool:
+        self.refresh()
+        return GLib.SOURCE_CONTINUE
+
+    def _on_interval_toggled(self, item: Gtk.RadioMenuItem, seconds: int) -> None:
+        if item.get_active():
+            self._settings.set_uint("refresh-interval", seconds)
+
+    def _on_setting_changed(self, _settings: Gio.Settings, key: str) -> None:
+        if key == "refresh-interval":
+            self._interval = self._settings.get_uint(key)
+            self._interval_item.set_label(
+                f"Refresh interval: {interval_label(self._interval)}"
+            )
+            self._schedule_timeout()
+        if key != "credential-revision":
+            self.refresh()
+
+    def _open_home_assistant(self) -> None:
+        base_url = self._settings.get_string("base-url").strip()
+        entity_id = self._settings.get_string("entity-id").strip()
+        if not base_url:
+            self._open_preferences()
+            return
+        path = (
+            f"/config/entities/entity/{urlparse.quote(entity_id, safe='')}"
+            if entity_id
+            else ""
+        )
+        try:
+            Gio.AppInfo.launch_default_for_uri(f"{base_url.rstrip('/')}{path}", None)
+        except GLib.Error as error:
+            self._show_error(f"Could not open Home Assistant: {error.message}")
+
+    def _open_preferences(self) -> None:
+        dialog = Gtk.Dialog(title="Home Assistant Sensor Indicator Preferences")
+        dialog.set_default_size(560, 420)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.APPLY)
+
+        grid = Gtk.Grid(column_spacing=12, row_spacing=12, margin=18)
+        dialog.get_content_area().add(grid)
+
+        fields: dict[str, Gtk.Entry] = {}
+        rows = (
+            ("base-url", "Home Assistant URL"),
+            ("entity-id", "Entity ID"),
+            ("attribute", "Attribute path (optional)"),
+            ("display-name", "Display name (optional)"),
+            ("label-template", "Label template"),
+            ("token", "Long-lived access token"),
+        )
+        for row_number, (key, label) in enumerate(rows):
+            label_widget = Gtk.Label(label=label, xalign=0)
+            entry = Gtk.Entry(hexpand=True)
+            if key == "token":
+                entry.set_placeholder_text("Leave empty to keep the stored token")
+                entry.set_visibility(False)
+                entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+            else:
+                entry.set_text(self._settings.get_string(key))
+            grid.attach(label_widget, 0, row_number, 1, 1)
+            grid.attach(entry, 1, row_number, 1, 1)
+            fields[key] = entry
+
+        decimal_values = (-1, 0, 1, 2, 3, 4, 5, 6)
+        decimal_combo = Gtk.ComboBoxText()
+        for value in decimal_values:
+            decimal_combo.append_text("As provided" if value == -1 else str(value))
+        decimal_combo.set_active(
+            decimal_values.index(self._settings.get_int("decimal-places"))
+        )
+        grid.attach(Gtk.Label(label="Decimal places", xalign=0), 0, len(rows), 1, 1)
+        grid.attach(decimal_combo, 1, len(rows), 1, 1)
+
+        error_label = Gtk.Label(xalign=0)
+        error_label.get_style_context().add_class("error")
+        grid.attach(error_label, 0, len(rows) + 1, 2, 1)
+
+        dialog.connect(
+            "response",
+            self._on_preferences_response,
+            fields,
+            decimal_combo,
+            decimal_values,
+            error_label,
+        )
+        dialog.show_all()
+
+    def _on_preferences_response(
+        self,
+        dialog: Gtk.Dialog,
+        response: int,
+        fields: dict[str, Gtk.Entry],
+        decimal_combo: Gtk.ComboBoxText,
+        decimal_values: tuple[int, ...],
+        error_label: Gtk.Label,
+    ) -> None:
+        if response != Gtk.ResponseType.APPLY:
+            dialog.destroy()
+            return
+
+        base_url = fields["base-url"].get_text().strip()
+        entity_id = fields["entity-id"].get_text().strip()
+        if not base_url or not entity_id:
+            error_label.set_text("Home Assistant URL and Entity ID are required.")
+            return
+        parsed_url = urlparse.urlparse(base_url)
+        if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+            error_label.set_text("Enter a valid HTTP or HTTPS Home Assistant URL.")
+            return
+
+        for key in (
+            "base-url",
+            "entity-id",
+            "attribute",
+            "display-name",
+            "label-template",
+        ):
+            self._settings.set_string(key, fields[key].get_text().strip())
+        self._settings.set_int(
+            "decimal-places", decimal_values[decimal_combo.get_active()]
+        )
+
+        token = fields["token"].get_text().strip()
+        dialog.destroy()
+        if token:
+            Secret.password_store(
+                SECRET_SCHEMA,
+                SECRET_ATTRIBUTES,
+                Secret.COLLECTION_DEFAULT,
+                "Home Assistant Sensor Indicator access token",
+                token,
+                None,
+                self._on_token_stored,
+            )
+        else:
+            self.refresh()
+
+    def _on_token_stored(self, _source: object, result: Gio.AsyncResult) -> None:
+        try:
+            Secret.password_store_finish(result)
+        except GLib.Error as error:
+            self._show_error(f"Could not save token: {error.message}")
+            return
+        revision = self._settings.get_uint("credential-revision")
+        self._settings.set_uint("credential-revision", (revision + 1) % (2**32))
+        self.refresh()
+
+    def _quit(self, _user_data: object = None) -> bool:
+        if self._timer_id:
+            GLib.source_remove(self._timer_id)
+            self._timer_id = 0
+        if self._settings_changed_id:
+            self._settings.disconnect(self._settings_changed_id)
+            self._settings_changed_id = 0
+        Gtk.main_quit()
+        return GLib.SOURCE_REMOVE
+
+
+def build_parser() -> argparse.ArgumentParser:
+    return argparse.ArgumentParser(
+        description=(
+            "Show a Home Assistant entity through a temporary AppIndicator "
+            "without restarting GNOME Shell."
+        )
+    )
+
+
+def main() -> int:
+    build_parser().parse_args()
+    try:
+        settings = load_settings()
+    except IndicatorError as error:
+        print(f"home-assistant-sensor-tray: {error}", file=sys.stderr)
+        return 1
+
+    TrayIndicator(settings).start()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

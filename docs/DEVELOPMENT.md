@@ -38,3 +38,15 @@ make pack
 ```
 
 The extension archive is written to `dist/`.
+
+## Test the temporary indicator
+
+After running `make install`, start the AppIndicator fallback with:
+
+```console
+./bin/home-assistant-sensor-tray
+```
+
+This requires the GTK 3, AppIndicator 3, libsecret, and Python GObject-
+introspection bindings. Select **Quit temporary indicator** from its menu when
+testing is complete.

@@ -13,6 +13,20 @@ Common causes are:
 - The entity ID does not exist or is not visible to the token's user.
 - The configured attribute path does not exist in the entity attributes.
 
+## The extension is installed but absent
+
+GNOME Wayland normally discovers newly installed native extensions only after a
+logout and login. To use the indicator immediately, enable AppIndicator support
+and start the included temporary process:
+
+```console
+gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com
+./bin/home-assistant-sensor-tray
+```
+
+The temporary indicator shares all settings and the keyring token with the native
+extension. It also has a **Preferences** item for initial configuration.
+
 ## The preferences cannot access the keyring
 
 The extension requires a Secret Service implementation and the libsecret GObject

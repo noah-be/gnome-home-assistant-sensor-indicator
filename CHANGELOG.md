@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.0 - 2026-09-03
+
+- Add a temporary AppIndicator with a standalone preferences dialog for immediate
+  use without logging out of a Wayland session.
+
 ## 1.0.0 - 2026-09-03
 
 - Add support for displaying any Home Assistant entity state.
