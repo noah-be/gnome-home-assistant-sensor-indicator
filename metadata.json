@@ -1,0 +1,16 @@
+{
+  "description": "Shows any Home Assistant entity state or attribute in the GNOME top panel.",
+  "name": "Home Assistant Sensor Indicator",
+  "settings-schema": "io.github.noahbe.home-assistant-sensor-indicator",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/noah-be/gnome-home-assistant-sensor-indicator",
+  "uuid": "home-assistant-sensor-indicator@noah-be.github.io",
+  "version": 1
+}

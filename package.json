@@ -1,0 +1,8 @@
+{
+  "name": "gnome-home-assistant-sensor-indicator",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/test-format.mjs"
+  }
+}
