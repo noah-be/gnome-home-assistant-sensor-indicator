@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.1 - 2026-09-03
+
+- Use a private runtime temporary directory so the GTK preferences dialog still
+  opens when the shared `/tmp` user quota is exhausted.
+
 ## 1.1.0 - 2026-09-03
 
 - Add a temporary AppIndicator with a standalone preferences dialog for immediate
