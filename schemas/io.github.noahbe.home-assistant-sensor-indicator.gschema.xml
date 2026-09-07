@@ -31,6 +31,18 @@
       <default>true</default>
       <summary>Show the symbolic Home Assistant icon</summary>
     </key>
+    <key name="color-thresholds-enabled" type="b">
+      <default>false</default>
+      <summary>Color numeric values according to configurable thresholds</summary>
+    </key>
+    <key name="color-thresholds" type="s">
+      <default>'[{"value":0,"color":"#e01b24"},{"value":50,"color":"#f6d32d"},{"value":100,"color":"#2ec27e"}]'</default>
+      <summary>JSON encoded numeric color thresholds</summary>
+    </key>
+    <key name="selected-value-is-numeric" type="b">
+      <default>false</default>
+      <summary>Whether the most recently selected sensor value was numeric</summary>
+    </key>
     <key name="refresh-interval" type="u">
       <range min="5" max="3600"/>
       <default>30</default>

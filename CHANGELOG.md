@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- Add optional, configurable threshold colors for numeric sensor states and
+  attributes.
+
 ## 1.1.1 - 2026-09-03
 
 - Use a private runtime temporary directory so the GTK preferences dialog still

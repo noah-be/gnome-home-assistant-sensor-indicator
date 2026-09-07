@@ -1,10 +1,16 @@
 import Adw from 'gi://Adw';
+import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 import {clearToken, lookupToken, storeToken} from './secret.js';
+import {
+    DEFAULT_COLOR_THRESHOLDS,
+    numericValue,
+    parseColorThresholds,
+} from './format.js';
 
 function addTextRow(group, settings, key, title, subtitle) {
     const row = new Adw.EntryRow({title});
@@ -17,6 +23,12 @@ function addTextRow(group, settings, key, title, subtitle) {
         }));
     group.add(row);
     return row;
+}
+
+function colorToHex(color) {
+    const component = value => Math.round(value * 255)
+        .toString(16).padStart(2, '0');
+    return `#${component(color.red)}${component(color.green)}${component(color.blue)}`;
 }
 
 export default class HomeAssistantSensorIndicatorPreferences extends ExtensionPreferences {
@@ -88,18 +100,24 @@ export default class HomeAssistantSensorIndicatorPreferences extends ExtensionPr
             title: 'Sensor',
             description: 'Select any Home Assistant entity state or one of its attributes.',
         });
-        addTextRow(
+        const entityRow = addTextRow(
             sensorGroup,
             settings,
             'entity-id',
             'Entity ID',
             'For example: sensor.outdoor_temperature');
-        addTextRow(
+        const attributeRow = addTextRow(
             sensorGroup,
             settings,
             'attribute',
             'Attribute path (optional)',
             'Leave empty for the state. Dotted paths such as forecast.today.temperature are supported.');
+        const invalidateNumericValue = () => {
+            settings.set_boolean('selected-value-is-numeric', false);
+            settings.set_boolean('color-thresholds-enabled', false);
+        };
+        entityRow.connect('changed', invalidateNumericValue);
+        attributeRow.connect('changed', invalidateNumericValue);
 
         const displayGroup = new Adw.PreferencesGroup({
             title: 'Panel display',
@@ -159,9 +177,138 @@ export default class HomeAssistantSensorIndicatorPreferences extends ExtensionPr
         });
         displayGroup.add(refreshRow);
 
+        const colorGroup = new Adw.PreferencesGroup({
+            title: 'Value colors',
+            description: 'Color numeric panel values according to configurable thresholds.',
+        });
+        const colorEnabledRow = new Adw.SwitchRow({
+            title: 'Enable threshold colors',
+        });
+        settings.bind(
+            'color-thresholds-enabled',
+            colorEnabledRow,
+            'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        settings.bind(
+            'selected-value-is-numeric',
+            colorEnabledRow,
+            'sensitive',
+            Gio.SettingsBindFlags.GET);
+        colorGroup.add(colorEnabledRow);
+
+        const updateColorAvailability = () => {
+            const available = settings.get_boolean('selected-value-is-numeric');
+            colorEnabledRow.subtitle = available
+                ? 'The panel label uses the color of the matching threshold.'
+                : 'Available after the selected state or attribute returns a numeric value.';
+            if (!available)
+                settings.set_boolean('color-thresholds-enabled', false);
+        };
+        settings.connect(
+            'changed::selected-value-is-numeric',
+            updateColorAvailability);
+        updateColorAvailability();
+
+        let thresholds = parseColorThresholds(
+            settings.get_string('color-thresholds'));
+        if (thresholds.length === 0)
+            thresholds = DEFAULT_COLOR_THRESHOLDS.map(threshold => ({...threshold}));
+
+        const editors = [];
+        let addThresholdRow = null;
+        const saveThresholds = () => {
+            settings.set_string('color-thresholds', JSON.stringify(
+                editors.map(editor => editor.threshold)));
+        };
+        const updateThresholdRows = () => {
+            for (const [index, editor] of editors.entries()) {
+                editor.row.title = `Threshold ${index + 1}`;
+                editor.removeButton.sensitive = editors.length > 1;
+            }
+        };
+        const addThresholdEditor = threshold => {
+            const editorThreshold = {...threshold};
+            const row = new Adw.EntryRow({
+                title: `Threshold ${editors.length + 1}`,
+                input_purpose: Gtk.InputPurpose.NUMBER,
+            });
+            row.text = String(editorThreshold.value);
+
+            const color = new Gdk.RGBA();
+            color.parse(editorThreshold.color);
+            const colorButton = new Gtk.ColorButton({
+                rgba: color,
+                use_alpha: false,
+                valign: Gtk.Align.CENTER,
+                tooltip_text: 'Choose threshold color',
+            });
+            row.add_suffix(colorButton);
+
+            const removeButton = new Gtk.Button({
+                icon_name: 'user-trash-symbolic',
+                valign: Gtk.Align.CENTER,
+                tooltip_text: 'Remove threshold',
+                css_classes: ['flat'],
+            });
+            row.add_suffix(removeButton);
+
+            const editor = {row, removeButton, threshold: editorThreshold};
+            editors.push(editor);
+            row.connect('changed', entry => {
+                const value = numericValue(entry.text);
+                if (value === null) {
+                    entry.add_css_class('error');
+                    return;
+                }
+                entry.remove_css_class('error');
+                editorThreshold.value = value;
+                saveThresholds();
+            });
+            colorButton.connect('color-set', button => {
+                editorThreshold.color = colorToHex(button.rgba);
+                saveThresholds();
+            });
+            removeButton.connect('clicked', () => {
+                if (editors.length === 1)
+                    return;
+                editors.splice(editors.indexOf(editor), 1);
+                colorGroup.remove(row);
+                updateThresholdRows();
+                saveThresholds();
+            });
+
+            if (addThresholdRow)
+                colorGroup.remove(addThresholdRow);
+            colorGroup.add(row);
+            if (addThresholdRow)
+                colorGroup.add(addThresholdRow);
+            updateThresholdRows();
+        };
+
+        for (const threshold of thresholds)
+            addThresholdEditor(threshold);
+
+        addThresholdRow = new Adw.ActionRow({
+            title: 'Add threshold',
+            subtitle: 'The highest threshold at or below the sensor value determines its color.',
+            activatable: true,
+        });
+        addThresholdRow.add_suffix(new Gtk.Image({
+            icon_name: 'list-add-symbolic',
+        }));
+        addThresholdRow.connect('activated', () => {
+            const highestValue = Math.max(
+                ...editors.map(editor => editor.threshold.value));
+            const lastColor = editors.at(-1)?.threshold.color ?? '#2ec27e';
+            addThresholdEditor({value: highestValue + 50, color: lastColor});
+            saveThresholds();
+        });
+        colorGroup.add(addThresholdRow);
+
         page.add(connectionGroup);
         page.add(sensorGroup);
         page.add(displayGroup);
+        page.add(colorGroup);
         window.add(page);
     }
 

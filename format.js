@@ -1,3 +1,11 @@
+export const DEFAULT_COLOR_THRESHOLDS = Object.freeze([
+    Object.freeze({value: 0, color: '#e01b24'}),
+    Object.freeze({value: 50, color: '#f6d32d'}),
+    Object.freeze({value: 100, color: '#2ec27e'}),
+]);
+
+const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
+
 export function valueAtPath(attributes, path) {
     if (!path)
         return undefined;
@@ -7,6 +15,60 @@ export function valueAtPath(attributes, path) {
             return undefined;
         return value[part];
     }, attributes);
+}
+
+export function numericValue(value) {
+    if (typeof value === 'number')
+        return Number.isFinite(value) ? value : null;
+    if (typeof value !== 'string' || value.trim() === '')
+        return null;
+
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+export function parseColorThresholds(serialized) {
+    let thresholds;
+    try {
+        thresholds = JSON.parse(serialized);
+    } catch (_error) {
+        return [];
+    }
+
+    if (!Array.isArray(thresholds))
+        return [];
+
+    return thresholds.flatMap(threshold => {
+        const value = numericValue(threshold?.value);
+        const color = threshold?.color;
+        if (value === null || typeof color !== 'string' ||
+            !HEX_COLOR_PATTERN.test(color))
+            return [];
+        return [{value, color: color.toLowerCase()}];
+    });
+}
+
+export function colorForValue(value, thresholds) {
+    const number = numericValue(value);
+    if (number === null)
+        return null;
+
+    const sorted = [...thresholds]
+        .filter(threshold => numericValue(threshold?.value) !== null &&
+            typeof threshold?.color === 'string' &&
+            HEX_COLOR_PATTERN.test(threshold.color))
+        .sort((left, right) =>
+            numericValue(left.value) - numericValue(right.value));
+    if (sorted.length === 0)
+        return null;
+
+    let color = sorted[0].color.toLowerCase();
+    for (const threshold of sorted) {
+        if (number < numericValue(threshold.value))
+            break;
+        color = threshold.color.toLowerCase();
+    }
+    return color;
 }
 
 export function formatValue(value, decimalPlaces = -1) {

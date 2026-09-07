@@ -15,6 +15,8 @@ attribute in the top panel.
 - Supports configurable label templates with `{name}`, `{value}`, `{unit}`, and
   `{entity}` placeholders.
 - Optionally rounds numeric values to zero through six decimal places.
+- Optionally colors numeric values using freely configurable thresholds. The
+  defaults are red below 50, yellow from 50, and green from 100.
 - Refreshes automatically every 5 seconds to 1 hour and supports manual refresh.
 - Shows entity details and Home Assistant timestamps in the indicator menu.
 - Opens the configured entity directly in Home Assistant.
@@ -79,6 +81,12 @@ it after the native extension becomes available following a later login.
 The default panel template is `{name}: {value} {unit}`. Leave **Attribute
 path** empty to display the entity state. To display a nested attribute, enter
 its dotted path.
+
+Threshold colors are disabled by default. After the selected state or attribute
+has returned a numeric value, enable them under **Value colors**. Each color
+applies from its threshold upward; values below the lowest threshold use the
+lowest threshold's color. Thresholds may be added, removed, and entered as
+integers, decimals, or scientific notation.
 
 The extension uses Home Assistant's documented
 [`GET /api/states/<entity_id>` REST endpoint](https://developers.home-assistant.io/docs/api/rest/#get-apistatesentity_id)

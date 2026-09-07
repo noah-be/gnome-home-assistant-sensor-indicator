@@ -10,7 +10,12 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {buildDisplay} from './format.js';
+import {
+    buildDisplay,
+    colorForValue,
+    numericValue,
+    parseColorThresholds,
+} from './format.js';
 import {lookupToken} from './secret.js';
 
 const MIN_REFRESH_SECONDS = 5;
@@ -97,11 +102,18 @@ class HomeAssistantSensorIndicator extends PanelMenu.Button {
             'display-name',
             'label-template',
             'show-icon',
+            'color-thresholds-enabled',
+            'color-thresholds',
         ]);
         if (visualKeys.has(key))
             this._applyVisualSettings();
 
-        if (key === 'base-url' || key === 'entity-id' ||
+        if (key === 'entity-id') {
+            this._setNumericAvailability(false);
+            this._settings.set_boolean('color-thresholds-enabled', false);
+        }
+
+        if (key === 'base-url' || key === 'entity-id' || key === 'attribute' ||
             key === 'credential-revision')
             this._queueRefresh();
     }
@@ -252,12 +264,15 @@ class HomeAssistantSensorIndicator extends PanelMenu.Button {
             });
         } catch (error) {
             this._lastEntity = entity;
+            this._setNumericAvailability(false);
             this._showError(error.message, true);
             return;
         }
 
         this._lastEntity = entity;
         this._label.text = display.label || display.value || entity.entity_id;
+        this._setNumericAvailability(numericValue(display.rawValue) !== null);
+        this._applyValueColor(display.rawValue);
         this._label.remove_style_class_name('home-assistant-indicator-error');
         this._nameItem.label.text = `Entity: ${display.name} (${entity.entity_id})`;
         this._valueItem.label.text = display.attribute
@@ -270,12 +285,30 @@ class HomeAssistantSensorIndicator extends PanelMenu.Button {
     _showError(message, preserveEntity = false) {
         if (!preserveEntity)
             this._lastEntity = null;
+        this._label.set_style('');
         this._label.text = 'Home Assistant !';
         this._label.add_style_class_name('home-assistant-indicator-error');
         this._nameItem.label.text = 'Sensor unavailable';
         this._valueItem.label.text = message || 'Unknown error';
         this._changedItem.label.text = 'Check the connection settings and entity ID.';
         this._updatedItem.label.text = 'Use “Refresh now” to retry.';
+    }
+
+    _setNumericAvailability(available) {
+        if (this._settings.get_boolean('selected-value-is-numeric') !== available)
+            this._settings.set_boolean('selected-value-is-numeric', available);
+        if (!available && this._settings.get_boolean('color-thresholds-enabled'))
+            this._settings.set_boolean('color-thresholds-enabled', false);
+    }
+
+    _applyValueColor(rawValue) {
+        let color = null;
+        if (this._settings.get_boolean('color-thresholds-enabled')) {
+            const thresholds = parseColorThresholds(
+                this._settings.get_string('color-thresholds'));
+            color = colorForValue(rawValue, thresholds);
+        }
+        this._label.set_style(color ? `color: ${color};` : '');
     }
 
     _formatTimestamp(timestamp) {
